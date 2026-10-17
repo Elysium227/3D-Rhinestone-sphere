@@ -3,7 +3,7 @@
 A disco ball made of code — 48,000 rhinestones, sequins, and jewel tesserae 
 packed onto a rotating sphere, each catching its own light at its own angle.
 
-**[Live demo →](#)**
+**[Live demo →](https://elysium227.github.io/3D-Rhinestone-sphere/)**
 
 ---
 
