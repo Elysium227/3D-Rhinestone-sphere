@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rhinestone Sphere</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; }
+  #label {
+    position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+    font-family:'Courier New',monospace; font-size:10px; letter-spacing:.4em;
+    color:rgba(255,255,255,0.10); text-transform:uppercase; pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="c"></div>
+<div id="label">drag to rotate</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.6;
+document.getElementById('c').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(50, W/H, 0.01, 100);
+camera.position.set(0, 0, 7.5);
+
+// ── Palette ───────────────────────────────────────────────────
+const PAL = [
+  [1.0, 0.07, 0.46],[1.0, 0.27, 0.67],[1.0, 0.0,  0.50],
+  [1.0, 0.85, 0.0 ],[1.0, 0.70, 0.0 ],[1.0, 0.63, 0.0 ],
+  [1.0, 1.0,  1.0 ],[0.88,0.90, 1.0 ],[0.78,0.85, 1.0 ],
+  [0.0, 0.90, 1.0 ],[0.0, 0.69, 1.0 ],[0.16,0.60, 1.0 ],
+  [0.67,0.0,  1.0 ],[0.73,0.27,1.0 ],[0.88,0.25,0.97],
+  [0.0, 0.90, 0.46],[0.41,1.0,  0.03],
+  [1.0, 0.24, 0.0 ],[1.0, 0.09, 0.27],
+  [0.11,0.91, 0.71],[0.39,1.0,  0.85],
+];
+
+// ── Fibonacci sphere ──────────────────────────────────────────
+function fibSphere(n, r) {
+  const out = [], phi = Math.PI*(3-Math.sqrt(5));
+  for (let i=0; i<n; i++) {
+    const y=1-(i/(n-1))*2, rr=Math.sqrt(Math.max(0,1-y*y)), a=phi*i;
+    out.push(new THREE.Vector3(Math.cos(a)*rr*r, y*r, Math.sin(a)*rr*r));
+  }
+  return out;
+}
+const N=48000, R=2.85;
+const pts = fibSphere(N, R);
+
+// ── Gem shader — exponent 12000, fresnel rim, coloured specular ──
+const GEM_VS = `
+  attribute vec3 instanceColor;
+  varying vec3 vColor;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vColor = instanceColor;
+    mat4 mv = modelMatrix * instanceMatrix;
+    vec4 wp = mv * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    mat3 nm = mat3(transpose(inverse(mv)));
+    vNormal = normalize(nm * normal);
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+const GEM_FS = `
+  precision highp float;
+  #define NL 6
+  uniform vec3 lightPos[NL];
+  uniform vec3 lightCol[NL];
+  uniform vec3 camPos;
+  varying vec3 vColor;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(camPos - vWorldPos);
+    float fresnel = pow(1.0 - max(dot(N,V),0.0), 3.5);
+
+    vec3 spec = vec3(0.0);
+    vec3 diff = vec3(0.0);
+    for (int i=0; i<NL; i++) {
+      vec3 L = normalize(lightPos[i] - vWorldPos);
+      vec3 H = normalize(L+V);
+      float NdH = max(dot(N,H), 0.0);
+      float NdL = max(dot(N,L), 0.0);
+      // ultra-tight mirror highlight + coloured secondary lobe
+      float sharp  = pow(NdH, 12000.0) * 28.0;
+      float medium = pow(NdH,  800.0)  *  3.0;
+      spec += lightCol[i] * (sharp + medium * vColor);
+      diff += vColor * lightCol[i] * NdL * 0.10;
+    }
+    // Fresnel adds coloured rim
+    vec3 rim = vColor * fresnel * 0.7;
+    vec3 col = vColor*0.04 + diff + spec + rim;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+const lightPos = Array.from({length:6}, ()=>new THREE.Vector3());
+const lightCol = [
+  new THREE.Vector3(1.0,0.27,0.87),
+  new THREE.Vector3(0.0,0.87,1.0),
+  new THREE.Vector3(1.0,0.85,0.0),
+  new THREE.Vector3(1.0,1.0, 1.0),
+  new THREE.Vector3(1.0,0.13,0.27),
+  new THREE.Vector3(0.27,1.0,0.67),
+];
+const gemUniforms = {
+  lightPos:{ value: lightPos },
+  lightCol:{ value: lightCol },
+  camPos:  { value: camera.position },
+};
+
+function buildLayer(geo, indices) {
+  const colData = new Float32Array(indices.length*3);
+  indices.forEach((_,k)=>{
+    const c=PAL[Math.floor(Math.random()*PAL.length)];
+    colData[k*3]=c[0]; colData[k*3+1]=c[1]; colData[k*3+2]=c[2];
+  });
+  const iGeo = geo.clone();
+  iGeo.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(colData,3));
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: GEM_VS, fragmentShader: GEM_FS,
+    uniforms: gemUniforms,
+  });
+  const mesh = new THREE.InstancedMesh(iGeo, mat, indices.length);
+  const d = new THREE.Object3D();
+  indices.forEach((src, k)=>{
+    const p=pts[src];
+    d.position.copy(p);
+    d.lookAt(0,0,0);
+    d.rotateX(Math.PI/2);
+    d.rotateZ((Math.random()-.5)*0.60);
+    d.rotateX((Math.random()-.5)*0.60);
+    d.rotateY(Math.random()*Math.PI*2);
+    const s=0.88+Math.random()*0.14;
+    d.scale.set(s, s, s*0.38);
+    d.updateMatrix();
+    mesh.setMatrixAt(k, d.matrix);
+  });
+  mesh.instanceMatrix.needsUpdate=true;
+  return mesh;
+}
+
+const allIdx = Array.from({length:N},(_,i)=>i);
+for(let i=allIdx.length-1;i>0;i--){
+  const j=Math.floor(Math.random()*(i+1));
+  [allIdx[i],allIdx[j]]=[allIdx[j],allIdx[i]];
+}
+const c1=Math.floor(N*.60), c2=Math.floor(N*.84);
+
+const gemGroup = new THREE.Group();
+[
+  buildLayer(new THREE.OctahedronGeometry(0.031,0), allIdx.slice(0, c1)),
+  buildLayer(new THREE.CylinderGeometry(0.029,0.029,0.006,8), allIdx.slice(c1,c2)),
+  buildLayer(new THREE.SphereGeometry(0.024,7,5), allIdx.slice(c2)),
+].forEach(m=>gemGroup.add(m));
+scene.add(gemGroup);
+
+// ── Star texture — sharper, smaller rays ──────────────────────
+function makeStarTex() {
+  const sz=96, cv=document.createElement('canvas');
+  cv.width=cv.height=sz;
+  const ctx=cv.getContext('2d'), cx=sz/2;
+
+  // Core glow — tight
+  const g=ctx.createRadialGradient(cx,cx,0,cx,cx,cx);
+  g.addColorStop(0,   'rgba(255,255,255,1)');
+  g.addColorStop(0.04,'rgba(255,255,255,0.95)');
+  g.addColorStop(0.14,'rgba(255,255,255,0.4)');
+  g.addColorStop(0.35,'rgba(255,255,255,0.05)');
+  g.addColorStop(1,   'rgba(255,255,255,0)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,sz,sz);
+
+  ctx.globalCompositeOperation='lighter';
+  // 4 sharp axis rays — very narrow
+  for(let i=0;i<4;i++){
+    ctx.save(); ctx.translate(cx,cx); ctx.rotate(i*Math.PI/2);
+    const rg=ctx.createLinearGradient(0,-cx,0,cx);
+    rg.addColorStop(0,   'rgba(255,255,255,0)');
+    rg.addColorStop(0.42,'rgba(255,255,255,0.08)');
+    rg.addColorStop(0.5, 'rgba(255,255,255,0.90)');
+    rg.addColorStop(0.58,'rgba(255,255,255,0.08)');
+    rg.addColorStop(1,   'rgba(255,255,255,0)');
+    ctx.fillStyle=rg;
+    ctx.fillRect(-1.5,-cx,3,sz);   // ← 3px wide (was 5)
+    ctx.restore();
+  }
+  // 4 diagonal rays — thinner still
+  for(let i=0;i<4;i++){
+    ctx.save(); ctx.translate(cx,cx); ctx.rotate(i*Math.PI/2+Math.PI/4);
+    const rg=ctx.createLinearGradient(0,-cx*.65,0,cx*.65);
+    rg.addColorStop(0,  'rgba(255,255,255,0)');
+    rg.addColorStop(0.5,'rgba(255,255,255,0.28)');
+    rg.addColorStop(1,  'rgba(255,255,255,0)');
+    ctx.fillStyle=rg;
+    ctx.fillRect(-1,   -cx*.65, 2, cx*1.3);  // ← 2px wide
+    ctx.restore();
+  }
+  return new THREE.CanvasTexture(cv);
+}
+
+// ── Sparkle points layer ──────────────────────────────────────
+const SPARK_VS = `
+  attribute float alpha;
+  attribute float sz;
+  attribute vec3  col;
+  varying float vAlpha;
+  varying vec3  vCol;
+  void main(){
+    vAlpha=alpha; vCol=col;
+    gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);
+    gl_PointSize=sz*alpha;           // ← size scales with alpha (pop in/out)
+  }
+`;
+const SPARK_FS = `
+  precision mediump float;
+  uniform sampler2D tex;
+  varying float vAlpha;
+  varying vec3  vCol;
+  void main(){
+    vec4 t=texture2D(tex,gl_PointCoord);
+    if(t.a<0.01) discard;
+    gl_FragColor=vec4(vCol*0.4+t.rgb*0.9, t.a*vAlpha);
+  }
+`;
+
+const sparkGeo = new THREE.BufferGeometry();
+const sparkPos   = new Float32Array(N*3);
+const sparkAlpha = new Float32Array(N);
+const sparkSz    = new Float32Array(N);
+const sparkCol   = new Float32Array(N*3);
+
+pts.forEach((p,i)=>{
+  sparkPos[i*3]=p.x; sparkPos[i*3+1]=p.y; sparkPos[i*3+2]=p.z;
+  sparkAlpha[i]=0;
+  sparkSz[i] = 10 + Math.random()*10;    // ← 10–20px (was 28–50)
+  const c=PAL[Math.floor(Math.random()*PAL.length)];
+  sparkCol[i*3]=c[0]; sparkCol[i*3+1]=c[1]; sparkCol[i*3+2]=c[2];
+});
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos,  3));
+sparkGeo.setAttribute('alpha',    new THREE.BufferAttribute(sparkAlpha,1));
+sparkGeo.setAttribute('sz',       new THREE.BufferAttribute(sparkSz,   1));
+sparkGeo.setAttribute('col',      new THREE.BufferAttribute(sparkCol,  3));
+
+const sparkMat = new THREE.ShaderMaterial({
+  vertexShader: SPARK_VS, fragmentShader: SPARK_FS,
+  uniforms:{ tex:{ value: makeStarTex() } },
+  transparent:true, depthWrite:false,
+  blending: THREE.AdditiveBlending,
+});
+const sparkPoints = new THREE.Points(sparkGeo, sparkMat);
+gemGroup.add(sparkPoints);
+
+// Sparkle state
+const sparkState = new Float32Array(N);
+function triggerSparks(n){
+  for(let k=0;k<n;k++){
+    const i=Math.floor(Math.random()*N);
+    if(sparkState[i]===0) sparkState[i]=0.001;
+  }
+}
+setInterval(()=>triggerSparks(18), 30);
+
+// ── Orbiting lights ───────────────────────────────────────────
+const orbitCfg=[
+  {spd:1.00,tilt: 0.40,r:5.2},{spd:0.71,tilt:-0.55,r:5.5},
+  {spd:1.37,tilt: 1.10,r:5.0},{spd:0.52,tilt:-0.20,r:5.8},
+  {spd:1.80,tilt: 0.80,r:4.8},{spd:0.95,tilt:-0.90,r:5.3},
+];
+
+// ── Drag/inertia ──────────────────────────────────────────────
+let drag=false,px=0,py=0,vx=0,vy=0,rotY=0,rotX=0;
+renderer.domElement.addEventListener('mousedown', e=>{drag=true;px=e.clientX;py=e.clientY;});
+window.addEventListener('mouseup',()=>drag=false);
+window.addEventListener('mousemove',e=>{
+  if(!drag)return;
+  vx=(e.clientX-px)*.005; vy=(e.clientY-py)*.005;
+  rotY+=vx; rotX+=vy; px=e.clientX; py=e.clientY;
+});
+renderer.domElement.addEventListener('touchstart',e=>{drag=true;px=e.touches[0].clientX;py=e.touches[0].clientY;},{passive:true});
+window.addEventListener('touchend',()=>drag=false);
+window.addEventListener('touchmove',e=>{
+  if(!drag)return;
+  vx=(e.touches[0].clientX-px)*.005; vy=(e.touches[0].clientY-py)*.005;
+  rotY+=vx; rotX+=vy; px=e.touches[0].clientX; py=e.touches[0].clientY;
+},{passive:true});
+window.addEventListener('resize',()=>{
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+});
+
+// ── Render loop ───────────────────────────────────────────────
+let t=0;
+(function animate(){
+  requestAnimationFrame(animate);
+  t+=0.007;
+
+  if(!drag){vx*=.93;vy*=.93;rotY+=vx+.002;rotX+=vy;rotX=Math.max(-1.4,Math.min(1.4,rotX));}
+  gemGroup.rotation.y=rotY;
+  gemGroup.rotation.x=rotX;
+
+  orbitCfg.forEach((cfg,i)=>{
+    const a=t*cfg.spd+i*1.047;
+    lightPos[i].set(Math.cos(a)*cfg.r, Math.sin(a*.7+cfg.tilt)*3.8, Math.sin(a)*cfg.r);
+  });
+  gemUniforms.lightPos.value=lightPos;
+  gemUniforms.camPos.value.copy(camera.position);
+
+  let dirty=false;
+  for(let i=0;i<N;i++){
+    if(sparkState[i]===0) continue;
+    sparkState[i]+=0.10;
+    const ph=sparkState[i];
+    sparkAlpha[i]=ph<0.5?ph*2:Math.max(0,2-ph*2);
+    if(ph>=1.0){sparkState[i]=0;sparkAlpha[i]=0;}
+    dirty=true;
+  }
+  if(dirty) sparkGeo.attributes.alpha.needsUpdate=true;
+
+  renderer.render(scene,camera);
+})();
+</script>
+</body>
+</html>
