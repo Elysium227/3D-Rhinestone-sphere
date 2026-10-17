@@ -1,4 +1,5 @@
 # Rhinestone Sphere
+![demo](demo.gif)
 
 A disco ball made of code — 48,000 rhinestones, sequins, and jewel tesserae 
 packed onto a rotating sphere, each catching its own light at its own angle.
